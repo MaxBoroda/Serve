@@ -33,11 +33,54 @@ Resources:
           sudo chmod +x /usr/local/bin/docker-compose
           curl -sSL https://raw.githubusercontent.com/bitnami/bitnami-docker-jenkins/master/docker-compose.yml > docker-compose.yml
           docker-compose up -d
+         # mount disc
+          sudo file -s /dev/sdh
+         # resurce
+          sudo yum install -y aws-cfn-bootstrap
+          sudo /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource MyServerGroup --region ${AWS::Region}
+
+          /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+
+          # Signal the status from cfn-init
+          sudo /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource MyServerGroup --region ${AWS::Region}
+
+          #!/usr/bin/env python
+          from boto.s3.connection import S3Connection
+          from boto.s3.key import Key
+          from boto.sqs.message import Message
+          from boto.ec2.connection import EC2Connection
+          import boto
+          import re, sys, os, stat, subprocess, json, time, logging
+
+          boto.set_file_logger('boto', '/home/ec2-user/boto.log', format_string="%(asctime)s - %(levelname)s - %(message)s")
+          logging.getLogger('boto').setLevel(logging.DEBUG)
+
+          sqs=boto.sqs.connect_to_region('us-east-1')
+          s3=boto.connect_s3()
+          ec2=boto.ec2.connect_to_region('us-east-1')
+          boto.log.info('Connections made')
+
+          inst_id=subprocess.check_output(["GET", "http://169.254.169.254/latest/meta-data/instance-id"])
+          boto.log.info('Got instance ID')
+
+          volume=ec2.create_volume(size=8, zone='us-east-1a', snapshot='')
+          vol_id=str(volume).split(':')[-1]
+          ec2.attach_volume(instance_id=inst_id, volume_id=vol_id, device='/dev/sdf')
+          while volume.status != u'available':
+              time.sleep(15)
+              volume.update()
+              volume.status
+          boto.log.info('volume attached')
+
+          #This doesn't work:
+          cmd=('sudo', 'mount', '/dev/sdf', '/jenkins_config')
+          c=subprocess.call(cmd)
   MyServerGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       AvailabilityZones:
-        Fn::GetAZs: ''
+        Fn::GetAZs: 'us-east-1a'
+      InstanceId: !Ref AvailabilityZones
       LaunchConfigurationName: !Ref SimpleConfig
       MinSize: '1'
       MaxSize: '3'
@@ -77,16 +120,11 @@ Resources:
       Size: 8
       VolumeType: gp2
       AvailabilityZone:
-        Fn::GetAtt: [ "EC2Instance", "AvailabilityZone" ]
+        Fn::GetAtt: [ "InstanceId", "AvailabilityZone" ]
 
   MountPoint:
     Type: AWS::EC2::VolumeAttachment
     Properties:
-      InstanceId: !Ref Ec2Instance
+      InstanceId: !Ref AvailabilityZone
       VolumeId: !Ref NewVolume
-      Device: /dev/sdh
-
-  Ec2Instance:
-    Type: AWS::EC2::Instance
-    Properties:
-      
+      Device: /dev/sdf
